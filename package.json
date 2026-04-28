@@ -1,0 +1,36 @@
+{
+  "name": "js-breakdown-skill",
+  "version": "1.0.0",
+  "description": "OpenClaw skill that breaks any task into parallel subtasks executed by Claude Code agents via ACP",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/breakdown.js",
+  "bin": {
+    "js-breakdown": "./cli/breakdown.js"
+  },
+  "files": [
+    "src/",
+    "cli/",
+    "SKILL.md",
+    "examples/"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node cli/breakdown.js",
+    "breakdown": "node cli/breakdown.js"
+  },
+  "keywords": [
+    "openclaw",
+    "claude-code",
+    "acp",
+    "task-decomposition",
+    "parallel-agents",
+    "skill"
+  ],
+  "author": "",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+  }
+}
