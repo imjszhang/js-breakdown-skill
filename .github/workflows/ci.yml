@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run tests
+        run: |
+          if node -e "process.exit(require('./package.json').scripts.test ? 0 : 1)"; then
+            npm test
+          else
+            echo "No test script — skipping tests"
+          fi
+
+      - name: Verify CLI (English decomposition)
+        run: node cli/breakdown.js --dry-run "Review the codebase for security issues"
+
+      - name: Verify CLI (CJK decomposition)
+        run: node cli/breakdown.js --dry-run "对 js-breakdown-skill 项目进行全面优化：补充测试、CI、ACP 集成"

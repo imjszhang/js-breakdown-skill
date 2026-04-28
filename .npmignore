@@ -1,0 +1,19 @@
+# Test files
+test/
+tests/
+__tests__/
+*.test.js
+*.test.mjs
+*.spec.js
+*.spec.mjs
+
+# Examples
+examples/
+
+# CI/CD
+.github/
+
+# Dev files
+.editorconfig
+.env.example
+*.log
