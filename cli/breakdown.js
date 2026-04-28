@@ -11,12 +11,8 @@
  * Also usable as an OpenClaw skill via the --skill-mode flag.
  */
 
-import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { resolve, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const DIR = new URL('..', import.meta.url).pathname;
+import { relative } from 'node:path';
 
 // ── Arg parsing ─────────────────────────────────────────────────────────────
 

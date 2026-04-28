@@ -31,10 +31,14 @@ const STRATEGY_PATTERNS = [
   {
     strategy: STRATEGY.BY_PERSPECTIVE,
     patterns: [
+      // Multiple quality dimensions listed (e.g. "security, performance, ...and accessibility")
+      /\b(?:security|performance|accessibility|maintainability|reliability|testing|code\s+structure|documentation|error\s+handling)\b.+\b(?:security|performance|accessibility|maintainability|reliability|testing|code\s+structure|documentation|error\s+handling)\b/i,
+      // "review/audit/analyze/assess ... for quality/issues/problems"
+      /\b(?:review|audit|analyze|assess)\b.*\b(?:for\s+)?(?:quality|issues|problems)\b/i,
       /\b(?:security\s+)?audit\b/i,
       /\bsecurity\s+review\b/i,
       /\b(?:review|analyze|assess)\s+(?:for|from)\s+(?:multiple\s+)?(?:perspectives?|angles?)\b/i,
-      /\breview\s+(?:all\s+)?(?:the\s+)?[\w\s]*?\b(?:code|files)\b.*?(?:security|vulnerab|quality|performance)\b/i,
+      /\breview\s+(?:all\s+)?(?:the\s+)?[\w\s]*?\b(?:code(?:base)?s?|files)\b.*?(?:security|vulnerab|quality|performance)\b/i,
       /\bresearch\b/i,
       /\b(?:evaluate|assess)\s+(?:the\s+)?(?:system|architecture|design)\b/i,
       /\bthreat\s+model/i,
@@ -46,7 +50,7 @@ const STRATEGY_PATTERNS = [
   {
     strategy: STRATEGY.BY_FEATURE,
     patterns: [
-      /\b(?:add|implement|build|create|develop)\s+.+?\s+(?:to|for|in)\s+(?:the\s+)?\w+(?:,\s*\w+)+/i,
+      /\b(?:add|implement|build|create|develop)\s+.+?\s+(?:to|for|in)\s+(?:the\s+)?\w+(?:\s+\w+)*(?:,\s*(?:and\s+)?\w+(?:\s+\w+)*)+/i,
       /\b(?:add|implement|build|create|develop)\s+(?:support\s+)?(?:for\s+)?(?:the\s+)?feature/i,
       /\bfeature\b/i,
       /\bmodule\b.*\b(?:each|every|separate)\b/i,
@@ -62,9 +66,9 @@ const STRATEGY_PATTERNS = [
     strategy: STRATEGY.BY_DIRECTORY,
     patterns: [
       /\b(every|all|each)\s+file/i,
-      /\b(?:all|every)\s+(?:the\s+)?files\s+in\b/i,
+      /\b(?:all|every)\s+(?:the\s+)?files\s+in\b.*(?:\bdirectory\b|\bfolder\b|\bfile\s*path\b|\w+\/|\w+\\)/i,
       /\beach\s+(?:sub)?directory\b/i,
-      /\breview\s+(?:all\s+)?(?:the\s+)?(?:code|files)\s+in\b/i,
+      /\breview\s+(?:all\s+)?(?:the\s+)?(?:code|files)\s+in\b.*(?:\bdirectory\b|\bfolder\b|\bfile\s*path\b|\w+\/|\w+\\)/i,
       /\blint\s+(?:all\s+)?(?:the\s+)?(?:files|code)\b/i,
       /\bformat\s+(?:all\s+)?(?:the\s+)?files\b/i,
       /\bdirectory\s+(?:by\s+directory|structure)\b/i,
@@ -109,6 +113,20 @@ function extractExplicitItems(text) {
   const bullets = text.match(/(?:^|\n)\s*[-*]\s+([^\n]+)/g);
   if (bullets && bullets.length >= 2) {
     return bullets.map(s => s.replace(/^\s*[-*]\s+/, '').trim()).filter(Boolean);
+  }
+
+  // Colon-separated list: "quality: check security, performance, ..."
+  // Handles "label: item1, item2, ..., itemN" patterns.
+  // Runs before oxford comma to avoid greedy match on label-prefix words.
+  const colonList = text.match(/:\s*(?:check\s+)?([^.:;]+(?:,\s*(?:and\s+)?[^,:;]+)+)/i);
+  if (colonList) {
+    const parts = colonList[1]
+      .split(/\s*,\s*(?:and\s+)?\s*/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (parts.length >= 2) {
+      return parts;
+    }
   }
 
   // Comma/or-delimited (but not sentence commas — look for known structural cues):
@@ -297,8 +315,17 @@ function decomposeByFeature(text, n, explicitItems) {
 /**
  * Assign different analysis perspectives to each agent.
  */
-function decomposeByPerspective(text, n) {
-  const perspectives = selectPerspectives(text, n);
+function decomposeByPerspective(text, n, explicitItems) {
+  let perspectives;
+  if (explicitItems && explicitItems.length >= 2) {
+    // Create perspective objects from user-specified items
+    perspectives = explicitItems.slice(0, n).map(item => ({
+      name: item.trim().replace(/\.$/, ''),
+      guidance: 'Analyze this aspect thoroughly.',
+    }));
+  } else {
+    perspectives = selectPerspectives(text, n);
+  }
 
   return perspectives.map((p, i) => ({
     id: `subtask-${i + 1}`,

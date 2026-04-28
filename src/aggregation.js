@@ -162,8 +162,8 @@ function hashFinding(f) {
  */
 function summarizePipeline(results) {
   const sorted = [...results].sort((a, b) => {
-    const orderA = a._order ?? 99;
-    const orderB = b._order ?? 99;
+    const orderA = a.order ?? 99;
+    const orderB = b.order ?? 99;
     return orderA - orderB;
   });
 

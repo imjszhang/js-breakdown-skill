@@ -8,6 +8,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 
 // ── Default config ──────────────────────────────────────────────────────────
 
@@ -139,7 +140,7 @@ export class Orchestrator extends EventEmitter {
         throw new Error('No spawnFn configured. Set options.spawnFn in the Orchestrator constructor.');
       }
 
-      const workDir = `${cwd}/${this._config.workDir}/${id}`;
+      const workDir = path.join(cwd, this._config.workDir, id);
       const handle = await this._spawnFn(session.subtask, workDir);
       session.handle = handle;
 
@@ -151,6 +152,7 @@ export class Orchestrator extends EventEmitter {
         description: session.subtask.description,
         target: session.subtask.target,
         strategy: session.subtask.strategy,
+        order: session.subtask.order,
         output: result,
         durationMs: Date.now() - session.startTime,
       });
@@ -171,6 +173,7 @@ export class Orchestrator extends EventEmitter {
           description: session.subtask.description,
           target: session.subtask.target,
           strategy: session.subtask.strategy,
+          order: session.subtask.order,
           error: err.message,
           retries: session.retries,
           durationMs: Date.now() - session.startTime,
@@ -204,7 +207,7 @@ export async function cliSpawnFn(subtask, workDir) {
   await mkdir(workDir, { recursive: true });
 
   // Write the subtask prompt to a file for the agent to read
-  await writeFile(`${workDir}/task.md`, subtask.prompt, 'utf-8');
+  await writeFile(path.join(workDir, 'task.md'), subtask.prompt, 'utf-8');
 
   return {
     wait: () => {
