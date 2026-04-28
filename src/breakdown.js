@@ -27,12 +27,38 @@ const DEFAULTS = {
 // BY_PERSPECTIVE is checked first because security/audit/review-for-quality
 // patterns are more specific than general directory/code-review patterns.
 
+// ── Helper: build a non-ASCII-aware pattern that works with CJK text ──
+// \b (word boundary) doesn't work between CJK characters. We use (?:^|[\s:：,，;；（(])
+// and (?:$|[\s:：,，;；）)]) as CJK-safe boundaries.
+const CJK_START = '(?:^|[\\s:：,，;；（(])';
+const CJK_END = '(?:$|[\\s:：,，;；）)])';
+
+// ── IMPORTANT: CJK by-feature patterns are checked BEFORE by-perspective ──
+// because CJK multi-feature lists (A、B、C) easily match the broad by-perspective patterns.
+const CJK_FEATURE_PATTERNS = [
+  // Chinese: explicit "补充/添加/实现/编写/增加" + enumerated items (A、B、C)
+  /[补充添加实现编写增加]+.*[、][^、\n]+[、]/,
+  // Chinese: 开发/创建 ... 功能/模块/组件/测试
+  /[开发创建构建]+.*(?:功能|模块|组件|特性|测试|工作流|集成|流水线|CI)/,
+  // Chinese: 重构/优化/改进/完善 ... 模块/功能/代码
+  /[重构优化改进完善]+.*(?:模块|功能|代码|结构|设计|项目)/,
+];
+
 const STRATEGY_PATTERNS = [
+  // CJK by-feature first (before by-perspective)
+  {
+    strategy: STRATEGY.BY_FEATURE,
+    patterns: CJK_FEATURE_PATTERNS,
+  },
   {
     strategy: STRATEGY.BY_PERSPECTIVE,
     patterns: [
       // Multiple quality dimensions listed (e.g. "security, performance, ...and accessibility")
       /\b(?:security|performance|accessibility|maintainability|reliability|testing|code\s+structure|documentation|error\s+handling)\b.+\b(?:security|performance|accessibility|maintainability|reliability|testing|code\s+structure|documentation|error\s+handling)\b/i,
+      // Chinese: multiple perspectives with Chinese separators
+      /[安全性能可靠可维护架构测试用户体验可访问性]+[、，,].*[安全性能可靠可维护架构测试用户体验可访问性]+/,
+      // Chinese: 审查/审计/评估 ... 质量/安全/性能
+      /[审查审计评估分析]+.*[质量安全性能架构可维护性可靠性]+/,
       // "review/audit/analyze/assess ... for quality/issues/problems"
       /\b(?:review|audit|analyze|assess)\b.*\b(?:for\s+)?(?:quality|issues|problems)\b/i,
       /\b(?:security\s+)?audit\b/i,
@@ -45,21 +71,37 @@ const STRATEGY_PATTERNS = [
       /\bcode\s+review\b.*\b(?:quality|security|performance)\b/i,
       /\banaly(sis|ze)\s+(?:of\s+)?(?:the\s+)?(?:system|architecture)\b/i,
       /\bcompare\s+(?:and\s+)?contrast\b/i,
+      // Chinese: 同时/并行/多 视角/维度/方面
+      /[同时并行]+.*[视角维度方面]+/,
+      // Chinese: 全面/完整 审查/检查/评估（限定更窄，避免误匹配优化类任务）
+      /[全面完整系统]+(?:[审查检查评估分析]+.*?[质量安全性能漏洞]|(?:审查|审计|评估|分析)[全面完整系统]+)/,
     ],
   },
   {
     strategy: STRATEGY.BY_FEATURE,
     patterns: [
       /\b(?:add|implement|build|create|develop)\s+.+?\s+(?:to|for|in)\s+(?:the\s+)?\w+(?:\s+\w+)*(?:,\s*(?:and\s+)?\w+(?:\s+\w+)*)+/i,
+      // Chinese: 添加/实现/构建/开发/增加 ... 到/给/在
+      /[添加实现构建开发增加加入补充]+.*(?:功能模块组件页面|到|给|在)/,
+      // Chinese: 开发/编写/创建 ... 功能/模块/组件
+      /[开发编写创建]+.*(?:功能|模块|组件|特性|特性支持)/,
       /\b(?:add|implement|build|create|develop)\s+(?:support\s+)?(?:for\s+)?(?:the\s+)?feature/i,
       /\bfeature\b/i,
       /\bmodule\b.*\b(?:each|every|separate)\b/i,
       /\bcomponent\b/i,
       /\b(?:add|write)\s+(?:unit\s+)?tests?\s+for\b/i,
+      // Chinese: 测试/编写测试
+      /[测试]+(?:编写|添加|补充|覆盖)?/,
       /\b(?:bug\s*fix|fix\s+the)\b/i,
+      // Chinese: 修复/修复bug
+      /[修复解决]+(?:问题|bug|缺陷)?/,
       /\brefactor\s+(?:the\s+)?\w+\s+module\b/i,
+      // Chinese: 重构/优化/改进
+      /[重构优化改进完善]+(?:模块|功能|代码|结构|设计)?/,
       /\bseparate\s+(?:into|by)\s+(?:module|feature|component)\b/i,
       /\bper\s+(?:module|feature|component)\b/i,
+      // Chinese: 每个/各个 ... 模块/功能
+      /[每个各个]+.*(?:模块|功能|组件|页面|目录)/,
     ],
   },
   {
@@ -74,6 +116,10 @@ const STRATEGY_PATTERNS = [
       /\bdirectory\s+(?:by\s+directory|structure)\b/i,
       /\bdoc(?:ument)?\s+(?:all|every|each)\s+(?:file|module)/i,
       /\breorganize\s+(?:files|directories)\b/i,
+      // Chinese: 所有/全部 文件/代码
+      /[所有全部]+.*(?:文件|代码|目录)/,
+      // Chinese: 整理/格式化 文件
+      /[整理格式化规范化]+.*(?:文件|代码)/,
     ],
   },
   {
@@ -88,6 +134,10 @@ const STRATEGY_PATTERNS = [
       /\bdata\s+(?:processing|pipeline)\b/i,
       /\b(?:build|compile|bundle|deploy)\s+(?:pipeline|process)\b/i,
       /\bsequential\b/i,
+      // Chinese: 流水线/工作流/阶段
+      /[流水线工作流阶段步骤流程]+/,
+      // Chinese: 迁移/处理/构建/部署 流程
+      /[迁移处理构建编译部署]+.*(?:流程|步骤|阶段)/,
     ],
   },
 ];
@@ -117,15 +167,35 @@ function extractExplicitItems(text) {
 
   // Colon-separated list: "quality: check security, performance, ..."
   // Handles "label: item1, item2, ..., itemN" patterns.
+  // Supports both English (:) and Chinese (：) colons.
   // Runs before oxford comma to avoid greedy match on label-prefix words.
-  const colonList = text.match(/:\s*(?:check\s+)?([^.:;]+(?:,\s*(?:and\s+)?[^,:;]+)+)/i);
+  const colonList = text.match(/[:：]\s*(?:check\s+)?([^.:：;；]+(?:[,，]\s*(?:and\s+)?[^,:：;；]+)+)/i);
   if (colonList) {
     const parts = colonList[1]
-      .split(/\s*,\s*(?:and\s+)?\s*/)
+      .split(/\s*[,，]\s*(?:and\s+)?\s*/)
       .map(s => s.trim())
       .filter(Boolean);
     if (parts.length >= 2) {
       return parts;
+    }
+  }
+
+  // Chinese enumeration separator (、): "功能A、功能B、功能C"
+  // Handles "item1、item2、item3" patterns.
+  const cjkEnum = text.match(/(?:在|给|到|为|对|关于|包括)?[^:：,，;；\n]+?(?=[、][^、\n]+[、])/);
+  if (cjkEnum) {
+    // Extract the full segment containing 、 separators
+    const segStart = cjkEnum.index;
+    const remainder = text.slice(segStart);
+    const fullSegment = remainder.match(/^([^:：;；\n]*?[、][^:：;；\n]+)/);
+    if (fullSegment) {
+      const parts = fullSegment[1]
+        .split(/[、]/)
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (parts.length >= 2) {
+        return parts;
+      }
     }
   }
 
