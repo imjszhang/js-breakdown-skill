@@ -1,8 +1,14 @@
 /**
  * Core decomposition logic for js-breakdown.
  *
- * Analyzes a natural-language task description and produces N independent
- * subtask plans optimized for parallel execution by Claude Code agents.
+ * **架构变更 (v2):** 此模块现在是纯 CLI / legacy fallback。
+ * 推荐模式是 agent-driven：OpenClaw Agent（具备 LLM 语义理解能力）负责
+ * 分析任务、读取项目结构、决定拆分策略和编写精准的 subtask prompt。
+ * js-breakdown 技能退化为纯粹的并行任务调度器（spawn + monitor + aggregate）。
+ *
+ * 以下函数在 agent-driven 模式下不应被调用。它们仅保留给：
+ * 1. `--legacy` CLI 模式（纯规则匹配，无需 LLM）
+ * 2. 无法使用 OpenClaw Agent 的环境
  */
 
 // ── Strategy types ──────────────────────────────────────────────────────────
@@ -302,7 +308,11 @@ function calculateN(text, explicitItems, complexityScore, config) {
 // ── Public: analyzeTask ──────────────────────────────────────────────────────
 
 /**
- * Analyze a task description and return its classification + suggested parallelism.
+ * **[DEPRECATED]** 分析任务描述，返回分类和推荐的并行度。
+ *
+ * 推荐使用 agent-driven 模式代替。OpenClaw Agent 具备 LLM 语义理解能力，
+ * 可以读取项目结构并写出精准的 prompt，远比正则匹配准确。
+ * 此函数仅用于 `--legacy` CLI 模式（纯规则匹配，无需 LLM）。
  *
  * @param {string} taskDescription - Natural language task description
  * @param {object} [options]
@@ -498,7 +508,11 @@ const DECOMPOSERS = {
 };
 
 /**
- * Decompose a task into N independent subtask plans.
+ * **[DEPRECATED]** 将任务拆分为 N 个独立子任务。
+ *
+ * 推荐使用 agent-driven 模式代替。让 OpenClaw Agent 决定拆分方案，
+ * 然后直接把 subtask 数组传给 Orchestrator 执行。
+ * 此函数仅用于 `--legacy` CLI 模式。
  *
  * @param {string} taskDescription - Natural language task description
  * @param {number} n - Number of subtasks to produce
@@ -533,7 +547,11 @@ export function decompose(taskDescription, n, options = {}) {
 }
 
 /**
- * Full analysis + decomposition in one call.
+ * **[DEPRECATED]** 完整的分析 + 拆分一步完成。
+ *
+ * 推荐使用 agent-driven 模式代替。在 agent-driven 模式中，Agent 自己做
+ * 分析（understand task → read project → decide strategy → write prompts），
+ * 此函数不应被调用。仅用于 `--legacy` CLI 模式。
  *
  * @param {string} taskDescription
  * @param {object} [options] - Config options passed through to analyzeTask

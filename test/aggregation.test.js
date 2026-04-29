@@ -2,6 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { aggregateResults } from '../src/aggregation.js';
 import { STRATEGY } from '../src/breakdown.js';
 
+// ── 注意 ────────────────────────────────────────────────────────────────────
+// aggregation 模块在 v2 中保持不变：agent-driven 和 legacy 模式共用同一套
+// 结果聚合逻辑。Agent 负责拆分决策，aggregation 负责将并行结果合并输出。
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Helper: create minimal result objects
 function makeResult(overrides = {}) {
   return {

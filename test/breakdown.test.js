@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { analyzeTask, decompose, breakdown, STRATEGY } from '../src/breakdown.js';
 
+// ── 注意 ────────────────────────────────────────────────────────────────────
+// 这些测试覆盖的是 legacy/regex 模式的 API（analyzeTask, decompose, breakdown）。
+// v2 推荐使用 agent-driven 模式：OpenClaw Agent 负责语义分析和任务拆分，
+// js-breakdown 退化为纯粹的并行任务调度器。legacy 模式仅为 --legacy fallback 保留。
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ── analyzeTask() tests ─────────────────────────────────────────────────────
 
 describe('analyzeTask()', () => {

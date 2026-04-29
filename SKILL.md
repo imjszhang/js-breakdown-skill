@@ -1,8 +1,32 @@
 # js-breakdown
 
-Break complex tasks into parallel subtasks executed by Claude Code agents. This skill analyzes a user's natural-language task, classifies it into a decomposition strategy, splits it into N independently executable subtasks, spawns parallel agent sessions, monitors them, and aggregates results into a unified report.
+Break complex tasks into parallel subtasks executed by Claude Code agents. This skill is a **pure parallel task scheduler** — the OpenClaw Agent (with LLM semantic understanding) makes all decomposition decisions, and js-breakdown handles execution, concurrency control, and result aggregation.
 
-**Works with English, Chinese, Japanese, and Korean (CJK) task descriptions** — the decomposition engine includes CJK-aware pattern matching, enumeration detection (`、`, `：`), and strategy detection tuned for non-English phrasing.
+**Works with English, Chinese, Japanese, and Korean (CJK) task descriptions** — the Agent understands the task in any language, reads project structure, and writes precise subtask prompts.
+
+---
+
+## Architecture Philosophy
+
+```
+┌──────────────────────────────────────────────────┐
+│  OpenClaw Agent (LLM)                             │
+│  - Understands task semantics                     │
+│  - Reads project file structure                   │
+│  - Decides: strategy, N, file assignments         │
+│  - Writes precise, context-aware subtask prompts   │
+└──────────┬───────────────────────────────────────┘
+           │ submits decomposition plan
+           ▼
+┌──────────────────────────────────────────────────┐
+│  js-breakdown skill (scheduler)                   │
+│  - Spawns parallel agent sessions                 │
+│  - Manages concurrency & retries                  │
+│  - Aggregates results by strategy                 │
+└──────────────────────────────────────────────────┘
+```
+
+**Key insight:** The skill used to do regex-based strategy detection (140+ patterns) and generate generic subtask prompts. This was inaccurate and didn't use project context. Now the Agent does all the thinking — the skill is purely a scheduler.
 
 ---
 
@@ -16,7 +40,6 @@ Invoke this skill when the user's task meets **any** of these criteria:
 - **Directory-scoped work** — Task targets "all files in", "every module in", "each component in"
 - **Pipeline/stage-based work** — Task describes sequential stages that could be partially parallelized
 - **High-complexity task** — Large, ambiguous, or multi-day task that benefits from decomposition
-- **CJK task descriptions** — Tasks in Chinese, Japanese, or Korean that describe multi-feature work or multi-perspective analysis
 
 **Do NOT invoke this skill when:**
 - The task is a single, atomic operation (e.g., "rename getCwd to getCurrentWorkingDirectory")
@@ -28,100 +51,104 @@ Invoke this skill when the user's task meets **any** of these criteria:
 
 ## Workflow
 
-### Step 1: Extract the Task
+### Step 1: Agent Analyzes the Task (NEW — replaces legacy CLI dry-run)
 
-Extract the user's task description from the message. The task may be:
+**The OpenClaw Agent does the decomposition, not the skill code.**
 
-- A quoted string: `"Review all TypeScript files in src/ for security issues"`
-- A `/breakdown` slash command argument
-- The user's entire message (if the message is a single task description)
-- Piped from stdin (in CLI mode)
+The Agent should:
 
-If the user provided no task description, respond: "What task would you like me to break down?"
+1. **Understand the task** — Parse the user's task description (any language). Identify what needs to be done, what the scope is, and whether it can benefit from parallelization.
 
-### Step 2: Run the Decomposer
+2. **Read project structure** — Use `tree` or equivalent to understand the file layout:
+   ```
+   # Quick: list top-level structure
+   ls -R --max-depth=2
+   # Or: use tree if available
+   tree -L 2 -I 'node_modules|.git'
+   ```
 
-Run the decomposition CLI in dry-run JSON mode to get the analysis and subtask plans without spawning agents:
+3. **Read key files** — If the task mentions specific files or directories, read them to understand scope and inter-dependencies. For cross-cutting tasks, read representative files to gauge complexity.
 
-```bash
-node cli/breakdown.js --task "<TASK_DESCRIPTION>" --json --dry-run
-```
+4. **Decide decomposition strategy** — Choose one of four strategies based on the task shape:
 
-If `cli/breakdown.js` is not found in the current working directory, resolve it relative to the skill installation path:
+   | Strategy | Best For | Decision Criteria |
+   |----------|----------|-------------------|
+   | `by-feature` | Feature/module work with clear boundaries | Task lists distinct features, modules, or components that can be worked on independently |
+   | `by-directory` | File/directory-scoped work | Task targets specific directories with disjoint scopes; each subtask works on its own directory |
+   | `by-perspective` | Multi-angle analysis/review | Task asks to review from multiple quality dimensions (security, performance, maintainability, etc.) |
+   | `by-pipeline` | Sequential stage-based work | Task has clear sequential stages; each stage must complete before the next can start |
 
-```bash
-node $SKILL_DIR/cli/breakdown.js --task "<TASK_DESCRIPTION>" --json --dry-run
-```
+5. **Determine subtask count (N)** — Based on:
+   - Number of explicit items in the task (files, features, perspectives, stages)
+   - Task complexity (scope breadth, technical depth, cross-cutting concerns)
+   - Practical limits: 2 ≤ N ≤ 8 (fewer is better — only split when there's clear parallelism)
 
-**Required:** Escape double quotes in the task description with `\"` or use single quotes if the shell supports it.
+6. **Assign files to subtasks** — For each subtask, specify which files/directories it should work on. This is critical for avoiding conflicts and ensuring complete coverage.
 
-#### Respect User Overrides
+7. **Write precise subtask prompts** — Each prompt must include:
+   - The original task context
+   - Specific files/directories the subtask is responsible for
+   - Clear scope boundaries ("only modify X, do not touch Y")
+   - Concrete acceptance criteria
+   - Any cross-cutting concerns to note but not implement
 
-If the user specified `--max-agents` (or `-n`), pass it through:
+8. **Determine dependencies** — For `by-pipeline` tasks, specify the order (stage 0 → stage 1 → stage 2). For all other strategies, subtasks should be fully independent.
 
-```bash
-node cli/breakdown.js --task "<TASK>" --json --dry-run --max-agents <N>
-```
-
-#### Parse the JSON Output
-
-The command outputs a JSON object with this structure:
-
-```json
-{
-  "analysis": {
-    "taskType": "by-feature",
-    "suggestedN": 4,
-    "complexity": 6,
-    "explicitItems": ["settings", "dashboard", "profile", "notifications"]
-  },
-  "subtasks": [
-    {
-      "id": "subtask-1",
-      "description": "settings",
-      "strategy": "by-feature",
-      "target": "settings",
-      "prompt": "Add dark mode support to all components...\n\n---\nYour assigned feature: settings..."
-    },
-    ...
-  ]
-}
-```
-
-#### Handle the "Too Simple" Case
-
-If `analysis.suggestedN < 2` or `analysis.complexity < 3`:
-
+**If the task is too simple to decompose** (complexity < 3, single file/action):
 1. Tell the user: "This task is straightforward enough that parallel decomposition wouldn't help. I'll handle it directly."
-2. Execute the task yourself as a single agent. Do NOT spawn parallel sessions.
-3. Skip to Step 6 (present results).
+2. Execute the task yourself. Skip Steps 2-7.
 
-### Step 3: Present the Decomposition Plan
+### Step 2: Present the Decomposition Plan
 
-Before spawning agents, show the user the plan:
+Show the user the plan for confirmation:
 
 ```
-I've analyzed the task and here's the decomposition plan:
+## Decomposition Plan
 
-  Strategy:    by-feature
-  Complexity:  6/10
-  Parallel agents: 4
-  Max concurrent:  8
+**Strategy:** by-feature
+**Subtasks:** 3
+**Max concurrent:** 8
 
-Subtasks:
-  1. [subtask-1] settings           (by-feature)
-  2. [subtask-2] dashboard          (by-feature)
-  3. [subtask-3] profile            (by-feature)
-  4. [subtask-4] notifications      (by-feature)
+### Subtask 1: settings
+- **Strategy:** by-feature
+- **Files:** src/components/settings/, src/styles/settings.css
+- **Prompt summary:** Add dark mode to the settings panel. Only modify files under
+  src/components/settings/ and src/styles/settings.css. Add CSS variables for color
+  scheme, toggle component, and persist preference to localStorage.
+- **Dependencies:** none
 
-Proceeding with parallel execution...
+### Subtask 2: dashboard
+- **Strategy:** by-feature
+- **Files:** src/components/dashboard/, src/styles/dashboard.css
+- **Prompt summary:** Add dark mode to the user dashboard. Only modify files under
+  src/components/dashboard/ and src/styles/dashboard.css. Use the same CSS variable
+  names as the settings subtask for consistency.
+- **Dependencies:** none (but coordinate CSS variable names with subtask 1)
+
+### Subtask 3: profile
+- **Strategy:** by-feature
+- **Files:** src/components/profile/, src/styles/profile.css
+- **Prompt summary:** Add dark mode to the profile page. Only modify files under
+  src/components/profile/ and src/styles/profile.css. Use the same CSS variable
+  naming convention.
+- **Dependencies:** none
 ```
 
-If the user specified `--dry-run`, stop here — do not spawn agents. The user only wanted the plan.
+If the user specified `--dry-run`, **stop here** — do not spawn agents.
+
+### Step 3: Write Subtask Prompts to Work Directory
+
+For each subtask, create its work directory and write the prompt:
+
+```bash
+mkdir -p .js-breakdown/<subtask-id>
+```
+
+Write the full prompt to `.js-breakdown/<subtask-id>/task.md`. This file serves as both the agent's instructions and a debugging record.
 
 ### Step 4: Spawn Parallel Agent Sessions
 
-For each subtask in the JSON `subtasks` array, spawn an agent session. Use `sessions_spawn` with these parameters:
+For each subtask, spawn an agent session via `sessions_spawn`:
 
 ```
 sessions_spawn(
@@ -134,19 +161,18 @@ sessions_spawn(
 )
 ```
 
-**Concurrency control:** Spawn all subtasks simultaneously but respect the `maxConcurrentSessions` cap (default 8). If there are more subtasks than the cap, spawn in batches:
+**Concurrency control:** Respect `maxConcurrentSessions` (default 8). If there are more subtasks than the cap:
 
-1. Spawn the first `maxConcurrentSessions` agents
+1. Spawn the first N agents (up to the cap)
 2. As each agent completes, spawn the next queued subtask
 3. Continue until all subtasks have been spawned and completed
 
-**Pipeline tasks (by-pipeline):** For pipeline-strategy tasks, subtasks have an `order` field. Spawn stages that have no dependency simultaneously, but respect sequential constraints. Typically, all pipeline stages are spawned in order but each stage must complete before the next begins — unless stages are explicitly marked as parallelizable.
+**Pipeline tasks (by-pipeline):** For pipeline-strategy tasks, spawn stages in order. Each stage must complete before the next begins — unless stages are explicitly marked as parallelizable.
 
 ### Step 5: Monitor Agent Progress
 
-Track session statuses. Use `sessions_status` or equivalent to poll agent states periodically (every 5–10 seconds for long-running tasks, or rely on `sessions_spawn` completion notifications if the runtime supports them).
+Track session statuses:
 
-For each agent, track:
 - **Started** — session has been spawned and is running
 - **Completed** — session returned a result (store the output)
 - **Failed** — session errored (handle retry or record failure)
@@ -154,7 +180,7 @@ For each agent, track:
 #### Retry Logic
 
 When a subtask fails:
-1. Retry up to `retryCount` times (default 2)
+1. Retry up to `JSBD_RETRY_COUNT` times (default 2)
 2. On retry, re-spawn with the same prompt and workDir
 3. If all retries are exhausted, record the subtask as `FAILED` with the error message
 4. Do NOT abort other running subtasks — they continue independently
@@ -174,19 +200,27 @@ Periodically report progress to the user:
 
 Once all agents complete (or fail permanently), aggregate the outputs.
 
-#### Choose Aggregation Strategy
+#### Aggregation Strategies
 
-Based on `analysis.taskType` from Step 2:
+| Task Strategy | Aggregation Method | Description |
+|---------------|-------------------|-------------|
+| `by-directory` | Concatenate | Each agent's output becomes a markdown section with the subtask description as header |
+| `by-feature` | Concatenate | Each agent's output becomes a markdown section |
+| `by-perspective` | Merge + Dedup | Parse findings from all agents, deduplicate by content hash, group by severity (Critical → High → Medium → Low → Info) |
+| `by-pipeline` | Stage summary | Present results in pipeline order with stage status (COMPLETED/FAILED) and duration |
 
-| Strategy | Task Type | Method | Description |
-|----------|-----------|--------|-------------|
-| `concatenate` | `by-directory`, `by-feature` | Section concatenation | Each agent's output becomes a markdown section with the subtask description as header |
-| `merge-dedup` | `by-perspective` | Finding deduplication | Parse findings from all agents, deduplicate by content hash, group by severity (Critical → High → Medium → Low → Info) |
-| `summary` | `by-pipeline` | Stage-by-stage summary | Present results in pipeline order with stage status (COMPLETED/FAILED) and duration |
+Use the aggregation module for consistent formatting:
+
+```js
+import { aggregateResults } from './src/aggregation.js';
+
+const results = [ /* collected from sessions_spawn */ ];
+const output = aggregateResults(results);
+```
 
 #### Aggregation Format
 
-Produce a single markdown document:
+For `by-feature` / `by-directory`:
 
 ```
 # Aggregated Results
@@ -206,34 +240,21 @@ Produce a single markdown document:
 > Duration: 38.7s
 
 [Agent output for dashboard...]
-
-────────────────────────────────────────────────────────────
-
-## profile (profile/)
-> FAILED: claude exited with code 1
-
-────────────────────────────────────────────────────────────
-
-### Failed Subtasks
-- **profile**: claude exited with code 1 (after 2 retries)
 ```
 
-For **by-perspective** tasks, use the deduplication format:
+For `by-perspective`:
 
 ```
 # Aggregated Findings (28 total, deduplicated)
 
 ## Critical (3)
-1. **Finding title** — Description
+1. **SQL injection in login** — User input not parameterized
    - Source perspective: security, architecture
 
 ## High (8)
 ...
 
 ## Medium (12)
-...
-
-## Low (5)
 ...
 ```
 
@@ -246,9 +267,39 @@ Output the aggregated markdown to the user. Include:
 3. **Failed subtask summary** (if any) — which subtasks failed and why
 4. **Work directory note** — mention that raw outputs are preserved in `.js-breakdown/`
 
-### Step 8: Clean Up (Optional)
+### Step 8: Archive Results (Required)
 
-By default, preserve work directories under `.js-breakdown/` for inspection. If the user requests cleanup, or if the `JSBD_CLEANUP` env var is set to `1`, remove the `.js-breakdown/` directory after presenting the report.
+**Every task execution must produce an archived result folder.** This ensures traceability and future reference.
+
+Create a result folder under the project's `.js-breakdown/results/` directory:
+
+```
+<project-root>/.js-breakdown/results/<YYYY-MM-DD-<task-slug>/
+├── REPORT.md          # Full aggregated report (required)
+├── DIFF.patch         # git diff snapshot of all changes (optional, for code tasks)
+└── METADATA.txt       # Commit hash, agent list, duration (optional)
+```
+
+**REPORT.md 必须包含**:
+- 任务背景和执行方式（strategy、agent 数量、耗时）
+- 改动汇总（按文件列出改动 + 理由）
+- 各 Agent 详细输出（每个 agent 的改动、发现、遗留建议）
+- 执行反思（成功之处 + 不足 + 改进措施）
+- 后续建议（优先级 + 预估工作量）
+
+**命名规范**:
+- 目录名: `YYYY-MM-DD-<简短英文描述>`（如 `2026-04-29-knowledge-collector-optimization`）
+- 任务 slug 从用户原始任务描述中提取关键词
+
+**完成后 commit 结果归档**（如果是代码项目）:
+```bash
+git add .js-breakdown/results/
+git commit -m "docs: add js-breakdown result archive for <task-slug>"
+```
+
+### Step 9: Clean Up (Optional)
+
+By default, preserve work directories under `.js-breakdown/` for inspection. If the user requests cleanup, or if the `JSBD_CLEANUP` env var is set to `1`, remove the `.js-breakdown/<subtask-id>/` work directories (but **never** remove `.js-breakdown/results/`).
 
 ---
 
@@ -268,7 +319,7 @@ All configuration is read from environment variables:
 To override at invocation time:
 
 ```
-/skill:breakdown --max-agents 6 "Review all files in src/ for bugs"
+/breakdown --max-agents 6 "Review all files in src/ for bugs"
 ```
 
 Or in the OpenClaw configuration:
@@ -284,19 +335,80 @@ skills:
 
 ---
 
+## Execution via Programmatic API (Optional)
+
+When the Agent has produced a decomposition plan, it can use the programmatic API to handle execution with proper concurrency control and retry logic:
+
+```js
+import { Orchestrator } from './src/orchestrator.js';
+import { aggregateResults } from './src/aggregation.js';
+
+// The Agent's decomposition plan (already decided in Step 1)
+const subtasks = [
+  {
+    id: 'subtask-1',
+    description: 'Add dark mode to settings panel',
+    strategy: 'by-feature',
+    target: 'settings',
+    prompt: 'Add dark mode support to src/components/settings/...\n\nOnly modify files under src/components/settings/ and src/styles/settings.css.\n\nAcceptance criteria:\n- Dark mode toggle in settings\n- Persist preference to localStorage\n- Use CSS custom properties for colors',
+    files: ['src/components/settings/', 'src/styles/settings.css'],
+  },
+  // ... more subtasks
+];
+
+// Spawn and monitor
+const orchestrator = new Orchestrator({
+  spawnFn: cliSpawnFn,      // or ACP spawn function
+  maxConcurrent: 8,
+  retryCount: 2,
+  workDir: '.js-breakdown',
+});
+
+const results = await orchestrator.runAll(subtasks, process.cwd());
+
+// Aggregate
+const markdown = aggregateResults(results);
+console.log(markdown);
+```
+
+Alternatively, generate sessions_spawn instructions for manual execution:
+
+```js
+import { generateSpawnInstructions, formatSpawnInstructions } from './src/acp-spawn.js';
+
+const instructions = generateSpawnInstructions(subtasks, process.cwd());
+console.log(formatSpawnInstructions(instructions));
+// → OpenClaw reads this and calls sessions_spawn for each subtask
+```
+
+---
+
+## Legacy Mode (--legacy)
+
+For environments where the Agent cannot do semantic analysis (pure CLI, no LLM available), the skill preserves its original regex-based decomposition as a fallback:
+
+```bash
+node cli/breakdown.js --legacy "Add dark mode to settings, dashboard, and profile"
+```
+
+In legacy mode, `src/breakdown.js` uses regex pattern matching to classify the task and generate subtask prompts. The prompts are generic (no project context) and the decomposition is based on keyword matching rather than semantic understanding. This mode exists only for backward compatibility — the agent-driven mode is always preferred.
+
+---
+
+## Decomposition Strategies Reference
+
+The Agent should choose from these four strategies:
+
+| Strategy | Best For | How to Split |
+|----------|----------|-------------|
+| **by-directory** | File/directory-scoped work | Assign each subtask a specific directory. Read the directory listing to ensure balanced workloads. |
+| **by-feature** | Feature/module development | Assign each subtask a specific feature or module. Identify feature boundaries from project structure. |
+| **by-perspective** | Multi-angle analysis/review | Assign each subtask a specific quality perspective (security, performance, maintainability, accessibility, reliability, testing, architecture, UX). All subtasks review the same code but from different angles. |
+| **by-pipeline** | Sequential stage-based work | Split the pipeline into stages. Each stage is a subtask that consumes the output of the previous stage. |
+
+---
+
 ## Error Handling
-
-### Decomposer CLI Fails to Run
-
-If `node cli/breakdown.js` fails (Node.js not installed, file not found, etc.):
-
-1. Try resolving the path with `$SKILL_DIR` prefix
-2. If that also fails, fall back to manual decomposition:
-   - Manually analyze the task using the strategy detection rules (see `src/breakdown.js` STRATEGY_PATTERNS)
-   - Split the task into 2–4 subtasks based on your best judgment
-   - Assign each subtask a clear, self-contained prompt
-   - Proceed with Steps 4–8
-3. Warn the user: "The breakdown CLI wasn't available (${error}). I've decomposed the task manually — the split may not be optimal."
 
 ### Subtask Fails After All Retries
 
@@ -314,7 +426,7 @@ If `sessions_spawn` fails with a concurrency-limit error:
 
 ### Task Cannot Be Meaningfully Decomposed
 
-If the decomposer returns `suggestedN < 2` or the user's task is inherently sequential:
+If the Agent determines the task is inherently sequential or too small:
 
 1. Tell the user: "This task can't be meaningfully parallelized because [reason]. I'll execute it directly."
 2. Execute the entire task yourself as a single agent
@@ -327,310 +439,19 @@ Common reasons a task can't be decomposed:
 
 ---
 
-## Examples
-
-### Example 1: Feature Development (English)
-
-**User input:**
-```
-/skill:breakdown "Add dark mode support to the settings panel, user dashboard, and profile page"
-```
-
-**Step-by-step behavior:**
-
-1. **Extract task**: `"Add dark mode support to the settings panel, user dashboard, and profile page"`
-2. **Run decomposer**:
-   ```
-   node cli/breakdown.js --task "Add dark mode support to the settings panel, user dashboard, and profile page" --json --dry-run
-   ```
-3. **JSON output**:
-   ```json
-   {
-     "analysis": {
-       "taskType": "by-feature",
-       "suggestedN": 3,
-       "complexity": 5,
-       "explicitItems": ["settings panel", "user dashboard", "profile page"]
-     },
-     "subtasks": [
-       {
-         "id": "subtask-1",
-         "description": "settings panel",
-         "strategy": "by-feature",
-         "target": "settings panel",
-         "prompt": "Add dark mode support to the settings panel, user dashboard, and profile page\n\n---\nYour assigned feature: settings panel\nFocus exclusively on this feature area."
-       },
-       {
-         "id": "subtask-2",
-         "description": "user dashboard",
-         "strategy": "by-feature",
-         "target": "user dashboard",
-         "prompt": "Add dark mode support to the settings panel, user dashboard, and profile page\n\n---\nYour assigned feature: user dashboard\nFocus exclusively on this feature area."
-       },
-       {
-         "id": "subtask-3",
-         "description": "profile page",
-         "strategy": "by-feature",
-         "target": "profile page",
-         "prompt": "Add dark mode support to the settings panel, user dashboard, and profile page\n\n---\nYour assigned feature: profile page\nFocus exclusively on this feature area."
-       }
-     ]
-   }
-   ```
-4. **Present plan**: Show strategy=by-feature, 3 agents, complexity=5/10
-5. **Spawn 3 agents**: Each gets a feature-specific prompt
-6. **Monitor**: Track progress, report completions
-7. **Aggregate**: Concatenation strategy — each agent's output as a section
-8. **Present report**: Unified markdown with settings/dashboard/profile sections
-
-### Example 2: Security Audit (Multi-Perspective)
-
-**User input:**
-```
-/skill:breakdown --max-agents 4 "Audit the REST API for vulnerabilities"
-```
-
-**Step-by-step behavior:**
-
-1. **Extract task**: `"Audit the REST API for vulnerabilities"` with max-agents=4
-2. **Run decomposer** (with `--max-agents 4`):
-   ```
-   node cli/breakdown.js --task "Audit the REST API for vulnerabilities" --json --dry-run --max-agents 4
-   ```
-3. **JSON output**: `taskType: "by-perspective"`, `suggestedN: 4`, `complexity: 7`
-4. **Subtask prompts**: Each agent gets the same task but a different perspective:
-   - Agent 1: "Focus exclusively on the **security** perspective. Look for vulnerabilities, injection risks, broken auth, data exposure."
-   - Agent 2: "Focus exclusively on the **performance** perspective. Identify bottlenecks, unnecessary allocations, slow queries."
-   - Agent 3: "Focus exclusively on the **maintainability** perspective. Assess code clarity, coupling, duplication."
-   - Agent 4: "Focus exclusively on the **reliability** perspective. Examine error handling, edge cases, race conditions."
-5. **Spawn 4 agents** concurrently
-6. **Aggregate**: Merge-dedup strategy — parse findings, deduplicate by hash, group by severity
-7. **Present report**: Findings grouped as Critical/High/Medium/Low/Info, with source perspective tags
-
-### Example 3: CJK Task (Chinese)
-
-**User input:**
-```
-在 src/ 目录中实现用户认证、权限管理和审计日志功能
-```
-(Translation: "Implement user authentication, permission management, and audit logging in src/")
-
-**Step-by-step behavior:**
-
-1. **Extract task**: Chinese text describing 3 features
-2. **Run decomposer**: The CJK pattern matchers detect:
-   - `[实现]+.*[功能]+` matches the by-feature strategy
-   - The `、` separator in a non-bullet context triggers Chinese enumeration detection
-3. **JSON output**: `taskType: "by-feature"`, `suggestedN: 3`, `explicitItems: ["用户认证", "权限管理", "审计日志"]`
-4. **Spawn 3 agents**: Each with a Chinese+English hybrid prompt scoped to their feature
-5. **Aggregate**: Concatenation strategy
-6. **Present report**: Three sections in markdown, one per feature
-
----
-
-## Decomposition Strategies Reference
-
-The skill auto-detects which strategy to use based on 140+ regex patterns covering English and CJK phrasing:
-
-| Strategy | Best For | Example Triggers |
-|----------|----------|-----------------|
-| **by-directory** | File/directory-scoped work | "Review all files in src/", "Lint every module", "整理所有文件" |
-| **by-feature** | Feature/module development | "Add dark mode to settings, dashboard", "实现用户认证、权限管理" |
-| **by-perspective** | Multi-angle analysis/review | "Audit for security", "全面审查代码质量", "Review from multiple perspectives" |
-| **by-pipeline** | Sequential stage-based work | "Migrate database and update models", "构建部署流水线", "ETL pipeline" |
-
----
-
-## OpenClaw Integration Workflow (Programmatic API)
-
-For programmatic use within OpenClaw skill handlers, the `src/openclaw-integration.js` and `src/acp-spawn.js` modules provide a structured 4-phase workflow that generates exact `sessions_spawn` calls and parses results.
-
-### Architecture
-
-```
-src/
-  breakdown.js               ← analyzeTask() + decompose() — task classification
-  acp-spawn.js                ← generateSpawnInstructions() + createAcpSpawnFn()
-  openclaw-integration.js     ← generateDecompositionPlan() + parseAgentResults()
-  orchestrator.js             ← spawns + manages parallel sessions (CLI mode)
-  aggregation.js              ← merges results by strategy
-```
-
-### Phase 1: Decompose the Task
-
-Call `breakdown()` or `generateDecompositionPlan()` to analyze and split the task:
-
-```js
-import { breakdown } from './src/breakdown.js';
-
-const { analysis, subtasks } = breakdown(
-  'Review all TypeScript files in src/ for security vulnerabilities'
-);
-
-// analysis = { taskType: 'by-perspective', suggestedN: 4, complexity: 7, ... }
-// subtasks = [{ id, description, strategy, target, prompt }, ...]
-```
-
-### Phase 2: Generate sessions_spawn Instructions
-
-Use `generateDecompositionPlan()` to get the exact `sessions_spawn` calls:
-
-```js
-import { generateDecompositionPlan } from './src/openclaw-integration.js';
-
-const plan = generateDecompositionPlan(
-  'Review all TypeScript files in src/ for security vulnerabilities',
-  { maxConcurrentSessions: 4, cwd: process.cwd() }
-);
-
-// plan.spawnInstructions[0].sessionsSpawnCall:
-// {
-//   tool: 'sessions_spawn',
-//   description: 'Analyze from perspective: security',
-//   prompt: 'Review all TypeScript files...\n\n---\nFocus exclusively on security...',
-//   workDir: '/project/.js-breakdown/subtask-1',
-//   id: 'subtask-1',
-//   metadata: { strategy: 'by-perspective', target: 'security' }
-// }
-
-// plan.planMarkdown contains the full markdown spawn plan for the host agent
-console.log(plan.planMarkdown);
-```
-
-The `createIntegrationPlan()` function also returns structured instructions for each phase:
-
-```js
-import { createIntegrationPlan } from './src/openclaw-integration.js';
-
-const fullPlan = createIntegrationPlan('Audit the REST API for vulnerabilities');
-
-// fullPlan.instructions.phase2.calls → array of exact sessions_spawn parameters
-// fullPlan.instructions.phase4.code → code snippet for result parsing
-```
-
-### Phase 3: Execute sessions_spawn Calls
-
-OpenClaw reads the spawn instructions and calls `sessions_spawn` for each subtask in parallel:
-
-```
-sessions_spawn(
-  description: "Analyze from perspective: security",
-  prompt: """Review all TypeScript files in src/ for security vulnerabilities
-
----
-Focus exclusively on the security perspective. Look for vulnerabilities, injection risks, broken auth, data exposure.""",
-  workDir: ".js-breakdown/subtask-1",
-  id: "subtask-1",
-  runtime: "acp",
-  agentId: "claude",
-  mode: "run",
-  timeout: 600000
-)
-```
-
-Spawn all subtasks simultaneously (respecting `maxConcurrentSessions` cap). Collect results as each session completes.
-
-### Phase 4: Parse and Aggregate Results
-
-Once all sessions complete, pass the collected results to `parseAgentResults()`:
-
-```js
-import { parseAgentResults } from './src/openclaw-integration.js';
-
-const rawResults = [
-  {
-    id: 'subtask-1',
-    description: 'Analyze from perspective: security',
-    strategy: 'by-perspective',
-    target: 'security',
-    output: '## Critical: SQL injection in login...\n## High: Missing CSRF...',
-    durationMs: 45000
-  },
-  {
-    id: 'subtask-2',
-    description: 'Analyze from perspective: performance',
-    strategy: 'by-perspective',
-    target: 'performance',
-    output: '## Medium: N+1 query in dashboard...',
-    durationMs: 32000
-  },
-  // ... more results
-];
-
-const { markdown, summary } = parseAgentResults(rawResults);
-
-console.log(summary);
-// { total: 4, succeeded: 3, failed: 1, results: [...] }
-
-console.log(markdown);
-// # Aggregated Findings (12 total, deduplicated)
-// ## Critical (2)
-// 1. **SQL injection in login** — ... Source perspective: security
-// ## High (3)
-// ...
-```
-
-### Low-Level ACP Spawn API
-
-For fine-grained control, `src/acp-spawn.js` provides lower-level functions:
-
-```js
-import { acpSpawnFn, generateSpawnInstructions } from './src/acp-spawn.js';
-
-// Option 1: Generate instructions for external consumption
-const instructions = generateSpawnInstructions(subtasks, process.cwd());
-for (const inst of instructions) {
-  // inst.sessionsSpawnCall contains the exact parameters for sessions_spawn
-  console.log(inst.sessionsSpawnCall);
-}
-
-// Option 2: Create a deferred session handle
-const handle = await acpSpawnFn(subtask, '/tmp/work/subtask-1');
-// handle.wait() → Promise that resolves when handle._resolve(result) is called
-// The host (OpenClaw) reads handle.prompt, calls sessions_spawn,
-// then calls handle._resolve(output) with the result.
-```
-
-### Integration with the Orchestrator
-
-For advanced use cases where you want the Orchestrator's concurrency management and retry logic alongside ACP spawning:
-
-```js
-import { Orchestrator } from './src/orchestrator.js';
-import { createAcpSpawnFn } from './src/acp-spawn.js';
-
-const spawnFn = createAcpSpawnFn({
-  onSpawn: (subtask, workDir, resolve, reject) => {
-    // Called for each subtask. The host calls sessions_spawn here
-    // and feeds the result back:
-    //   const result = await sessionsSpawn({ ... });
-    //   resolve(result.output);
-    // Or on error:
-    //   reject(new Error(result.error));
-  },
-});
-
-const orch = new Orchestrator({ spawnFn, maxConcurrent: 4 });
-const results = await orch.runAll(subtasks, process.cwd());
-```
-
----
-
 ## Limitations and Caveats
 
-1. **Independent subtasks only** — This skill decomposes into *independent* subtasks. If subtasks have hard runtime dependencies on each other's outputs, decomposition will produce incorrect results. Use sequential execution instead.
+1. **Independent subtasks only** — Subtasks must be independent. If subtasks have hard runtime dependencies on each other's outputs, use `by-pipeline` strategy or sequential execution.
 
-2. **File-based coordination only** — Agents coordinate through the shared filesystem (`.js-breakdown/`). There is no real-time inter-agent messaging. If agents need to negotiate or synchronize during execution, this skill is not appropriate.
+2. **File-based coordination only** — Agents coordinate through the shared filesystem (`.js-breakdown/`). There is no real-time inter-agent messaging.
 
-3. **Overhead for small tasks** — For tasks completable in under 30 seconds by a single agent, the decomposition and aggregation overhead may exceed the parallelization benefit. The skill will decline to decompose tasks with complexity < 3.
+3. **Overhead for small tasks** — For tasks completable in under 30 seconds by a single agent, the decomposition and aggregation overhead may exceed the parallelization benefit.
 
-4. **Not for real-time collaboration** — Each agent works in isolation on its assigned scope. If the task requires agents to jointly design an API contract or negotiate architecture decisions in real time, handle it with a single multi-turn session instead.
+4. **Not for real-time collaboration** — Each agent works in isolation. If agents need to jointly design an API contract or negotiate architecture decisions in real time, handle it with a single multi-turn session instead.
 
-5. **Output quality depends on prompt clarity** — The quality of subtask outputs depends on how well the original task description scopes each subtask. Vague tasks produce vague subtask prompts. Encourage users to be specific.
+5. **Output quality depends on prompt quality** — The quality of subtask outputs depends on how well the Agent writes the subtask prompts. Be specific about file paths, scope boundaries, and acceptance criteria.
 
-6. **CJK coverage is not exhaustive** — CJK pattern matching covers common Chinese software development terminology (实现、重构、修复、优化、审查、测试) and enumeration patterns (、, ：). Uncommon phrasing or domain-specific jargon may not be detected correctly. In such cases, specify the strategy explicitly or list subtasks manually.
-
-7. **Token consumption** — Parallel agents consume tokens independently. A 4-agent decomposition uses roughly 4x the tokens of a single-agent run. Consider this cost before decomposing borderline tasks.
+6. **Token consumption** — Parallel agents consume tokens independently. A 4-agent decomposition uses roughly 4x the tokens of a single-agent run.
 
 ---
 
@@ -640,4 +461,4 @@ const results = await orch.runAll(subtasks, process.cwd());
 - Each agent's prompt is also written to `.js-breakdown/<subtask-id>/task.md` for debugging
 - The aggregation module's finding deduplication uses content hashing — near-duplicate findings (same issue, different wording) may not be deduplicated
 - Environment variables override defaults; CLI flags (`--max-agents`) override environment variables
-- For programmatic use, see `src/openclaw-integration.js` (high-level API) and `src/acp-spawn.js` (low-level ACP spawn integration)
+- The legacy regex mode (`--legacy`) is available for pure CLI environments without LLM access

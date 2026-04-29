@@ -2,60 +2,79 @@
 
 An OpenClaw skill that breaks any task into multiple subtasks executed in parallel by Claude Code agents via ACP.
 
-## Concept
+## Architecture (v2)
 
-You give it a task — it figures out how to split it into N independent pieces, spawns N Claude Code sessions in parallel, and aggregates the results.
+**Key change from v1:** The skill no longer does regex-based strategy detection. Instead, the OpenClaw Agent (with LLM semantic understanding) makes all decomposition decisions, and js-breakdown acts as a pure parallel task scheduler.
 
 ```
-Input:  "Add dark mode to settings, dashboard, and profile page"
-Output: 3 parallel agents → aggregated result
-
-        ┌──────────────────┐
-        │   Decomposer     │
-        │  (analyze +      │
-        │   decompose)     │
-        └───┬──┬──┬──┬────┘
-            │  │  │  │
-    ┌───────┘  │  │  └───────┐
-    ▼          ▼  ▼          ▼
- Agent 1   Agent 2 ... Agent N
- (ACP)     (ACP)       (ACP)
-    │          │          │
-    └──────────┴──────────┘
-               │
-        ┌──────▼──────┐
-        │  Aggregator │
-        └──────┬──────┘
-               ▼
-         Final Output
+┌──────────────────────────────────────────────┐
+│  OpenClaw Agent (LLM)                        │
+│  - Understands task semantics               │
+│  - Reads project file structure             │
+│  - Decides: strategy, N, file assignments   │
+│  - Writes precise, context-aware prompts    │
+└────────────┬─────────────────────────────────┘
+             │ subtask plans (JSON)
+             ▼
+┌──────────────────────────────────────────────┐
+│  js-breakdown skill (scheduler)              │
+│  - Spawns parallel agent sessions            │
+│  - Manages concurrency & retries             │
+│  - Aggregates results by strategy            │
+└──────────────────────────────────────────────┘
 ```
+
+**How it works:**
+1. Agent analyzes task, reads project tree, decides decomposition strategy
+2. Agent writes precise subtask prompts (with file paths, scope boundaries, acceptance criteria)
+3. js-breakdown spawns agents in parallel, monitors progress, retries failures
+4. Results are aggregated by strategy (concatenate / merge-dedup / pipeline summary)
 
 ## Installation
 
 ```bash
 npm install -g js-breakdown
-# or
-npx js-breakdown "your task"
 ```
 
 Requires Node.js 18+ and the Claude Code CLI (`claude`) on your PATH.
 
 ## Usage
 
-### CLI (standalone)
+### Agent-Driven Mode (recommended)
+
+The OpenClaw Agent analyzes the task and passes pre-computed subtask plans to js-breakdown for execution:
 
 ```bash
-# Direct task
-npx js-breakdown "Review all TypeScript files in src/ for security issues"
+# Agent provides subtask plans as JSON
+npx js-breakdown --subtasks '[
+  {
+    "id": "subtask-1",
+    "description": "Add dark mode to settings",
+    "strategy": "by-feature",
+    "target": "settings",
+    "prompt": "Add dark mode support to src/components/settings/...\nOnly modify files under src/components/settings/..."
+  },
+  {
+    "id": "subtask-2",
+    "description": "Add dark mode to dashboard",
+    "strategy": "by-feature",
+    "target": "dashboard",
+    "prompt": "Add dark mode support to src/components/dashboard/..."
+  }
+]'
 
-# Via pipe
-echo "Add unit tests for auth, billing, and profile modules" | npx js-breakdown
+# Or from a file
+npx js-breakdown --subtasks-file ./decomposition-plan.json
 
-# Options
-npx js-breakdown \
-  --task "Refactor the entire codebase" \
-  --max-agents 6 \
-  --dry-run
+# Dry-run to see the plan
+npx js-breakdown --subtasks-file ./plan.json --dry-run
+```
+
+### Legacy Mode (regex-based, no LLM needed)
+
+```bash
+npx js-breakdown --legacy "Add dark mode to settings, dashboard, and profile"
+echo "Review all TypeScript files for security" | npx js-breakdown --legacy
 ```
 
 ### OpenClaw Skill
@@ -63,92 +82,101 @@ npx js-breakdown \
 When installed as an OpenClaw skill, invoke it with:
 
 ```
-/skill:breakdown "Audit the API for security vulnerabilities"
+/breakdown "Audit the API for security vulnerabilities"
 ```
 
-Or with options:
-
-```
-/skill:breakdown --task "Write tests for every module in lib/" --max-agents 8
-```
+The Agent will follow the workflow in SKILL.md: analyze the task, read project structure, decide the decomposition, present the plan, spawn agents, and aggregate results.
 
 ### Options
 
 | Flag | Env Variable | Description |
 |------|-------------|-------------|
-| `--task` / `-t` | — | Task description (not needed if first positional arg) |
-| `--max-agents` / `-n` | `JSBD_MAX_CONCURRENT` | Max parallel agents |
-| `--dry-run` / `--dry` | — | Show decomposition plan without spawning agents |
+| `--task` / `-t` | — | Task description (legacy mode) |
+| `--legacy` | — | Use regex-based decomposition (no LLM) |
+| `--subtasks` | — | Pre-computed subtask JSON (agent-driven) |
+| `--subtasks-file` | — | Read subtasks from JSON file |
+| `--max-agents` / `-n` | `JSBD_MAX_CONCURRENT` | Max parallel agents (default: 8) |
+| `--dry-run` / `--dry` | — | Show plan without spawning agents |
 | `--json` | — | Output JSON along with formatted results |
 | `--help` / `-h` | — | Show help |
 
-## How It Works
+## Decomposition Strategies
 
-### 1. Task Analysis
+The Agent chooses from four strategies based on task shape:
 
-The decomposer classifies the task into one of four strategies:
-
-| Strategy | When Used | Example |
-|----------|-----------|---------|
-| **by-directory** | Working on files/paths | "Lint all JS files in src/" |
-| **by-feature** | Working on modules/features | "Add dark mode to settings, dashboard, profile" |
-| **by-perspective** | Multi-angle analysis | "Audit the API for vulnerabilities" |
-| **by-pipeline** | Sequential stages | "Migrate database and update data models" |
-
-### 2. Dynamic N Calculation
-
-Parallelism isn't fixed at 4. The decomposer determines optimal N based on:
-- **Explicit items**: If the task lists "settings, dashboard, profile" → N = 3
-- **Complexity score**: Longer, more technical tasks get higher N
-- **Diminishing returns cap**: N never exceeds `maxConcurrentSessions` (default 8)
-- **Minimum**: Never decomposes into fewer than 2 subtasks
-
-### 3. Parallel Execution
-
-Subtasks run as independent Claude Code sessions via ACP. Each session:
-- Gets a self-contained prompt with clear scope boundaries
-- Works in its own subdirectory under `.js-breakdown/`
-- Has no knowledge of other agents (file-based coordination only)
-
-### 4. Result Aggregation
-
-Strategy-appropriate merging:
-- **by-directory / by-feature**: Concatenated with section headers
-- **by-perspective**: Merged and deduplicated by finding signature
-- **by-pipeline**: Stage-by-stage summary in dependency order
-
-## Examples
-
-See the [`examples/`](./examples/) directory for full walkthroughs:
-- [Code review](./examples/code-review.md): Review a multi-module codebase
-- [Feature development](./examples/feature-dev.md): Build features across multiple components
-- [Research analysis](./examples/research.md): Multi-perspective analysis
+| Strategy | Best For | Splitting Method |
+|----------|----------|-----------------|
+| **by-directory** | File/directory-scoped work | Assign each subtask a specific directory |
+| **by-feature** | Feature/module development | Assign each subtask a specific feature or module |
+| **by-perspective** | Multi-angle analysis | Each subtask reviews the same code from a different quality angle |
+| **by-pipeline** | Sequential stages | Split pipeline into ordered stages |
 
 ## Architecture
 
 ```
-cli/breakdown.js     ← CLI entry point (args → pipeline)
+SKILL.md              ← Agent workflow: Steps 1-8 (see SKILL.md for details)
+cli/breakdown.js      ← CLI entry point (agent-driven + --legacy fallback)
 src/
-  breakdown.js       ← analyzeTask() + decompose() — the "brain"
-  orchestrator.js    ← spawns + manages parallel ACP sessions
-  aggregation.js     ← merges results by strategy
+  breakdown.js        ← [DEPRECATED] analyzeTask() + decompose() — legacy fallback
+  orchestrator.js     ← spawns + manages parallel ACP sessions (concurrency, retry)
+  aggregation.js      ← merges results by strategy (concatenate, merge-dedup, summary)
+  acp-spawn.js        ← ACP sessions_spawn instruction generator
+  openclaw-integration.js ← High-level OpenClaw integration API
 ```
 
 ### Using the API Directly
 
 ```js
-import { breakdown } from 'js-breakdown';
 import { Orchestrator, cliSpawnFn } from 'js-breakdown/src/orchestrator.js';
 import { aggregateResults } from 'js-breakdown/src/aggregation.js';
 
-const { analysis, subtasks } = breakdown('Audit the API for security issues');
-// analysis = { taskType: 'by-perspective', suggestedN: 4, complexity: 7, ... }
-// subtasks = [{ id, description, strategy, target, prompt }, ...]
+// Subtask plans come from the Agent (LLM analysis, not regex)
+const subtasks = [
+  {
+    id: 'subtask-1',
+    description: 'Add dark mode to settings',
+    strategy: 'by-feature',
+    target: 'settings',
+    prompt: 'Add dark mode to src/components/settings/...',
+  },
+  {
+    id: 'subtask-2',
+    description: 'Add dark mode to dashboard',
+    strategy: 'by-feature',
+    target: 'dashboard',
+    prompt: 'Add dark mode to src/components/dashboard/...',
+  },
+];
 
+// Execute subtasks in parallel
 const orchestrator = new Orchestrator({ spawnFn: cliSpawnFn });
-const results = await orchestrator.spawnParallelSessions(subtasks, process.cwd());
+const results = await orchestrator.runAll(subtasks, process.cwd());
+
+// Aggregate results
 const output = aggregateResults(results);
 console.log(output);
+```
+
+### Legacy API (--legacy only)
+
+```js
+import { breakdown } from 'js-breakdown';
+
+// Uses regex-based strategy detection — generic prompts, no project context
+const { analysis, subtasks } = breakdown('Audit the API for security issues');
+```
+
+### OpenClaw Integration
+
+```js
+import { generateDecompositionPlan, parseAgentResults } from 'js-breakdown/src/openclaw-integration.js';
+
+// Generate spawn instructions for the Agent
+const plan = generateDecompositionPlan('Review all TS files for security issues');
+console.log(plan.planMarkdown);
+
+// Parse results after all sessions complete
+const { markdown, summary } = parseAgentResults(rawSessionResults);
 ```
 
 ## License

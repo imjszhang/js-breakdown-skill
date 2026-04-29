@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { Orchestrator, mockSpawnFn } from '../src/orchestrator.js';
 import { STRATEGY } from '../src/breakdown.js';
 
+// ── 注意 ────────────────────────────────────────────────────────────────────
+// Orchestrator 在 v2 中保持不变：agent-driven 和 legacy 模式共用同一套
+// 并发调度 + 重试逻辑。Agent 负责拆分决策，Orchestrator 负责并行执行管理。
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Helper: create minimal subtask objects
 function makeSubtasks(count, strategy = STRATEGY.BY_FEATURE) {
   return Array.from({ length: count }, (_, i) => ({
